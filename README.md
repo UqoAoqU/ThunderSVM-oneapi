@@ -168,5 +168,3 @@ vtune -collect gpu-offload -- ./run.sh data
 ```
 
 运行结果存放于run目录下的result.txt中。
-
-### 
