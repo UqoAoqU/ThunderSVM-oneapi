@@ -1,129 +1,172 @@
-### **Baseline**
+# PAC22-Thundersvm 
 
-**Complie options**
+### 概览：
 
-icpx
+本项目将[thundersvm]([Xtra-Computing/thundersvm: ThunderSVM: A Fast SVM Library on GPUs and CPUs (github.com)](https://github.com/Xtra-Computing/thundersvm))进行了移植，使其可以运行在多块intel GPU上。项目重点在于如何使用oneapi套件对cuda代码进行移植优化，以及实现现版本intelGPU的多卡计算。在项目的移植与优化过程中，使用到的开发套件有dpcpp，oneMKL，以及dpcpp library。同时主要使用了intel Vtune进行项目代码的调优。
 
-***Run***
+### 代码移植：
 
-../build/bin/thundersvm-train -s 0 -t 2 -g 1 -c 10 -o 1 ../data/demo
+1. 普通kernel函数的移植
 
-| main loop |
-| --------- |
-| 240.036s  |
+   cuda代码的格式与dpcpp的格式基本一致，大多数情况下可以在不修改GPU核心计算代码的情况下完成移植。但需要注意的是目前dpcpp还不支持动态并行，所以部分代码需要进行调整。
 
-### **启用多核**
+   例如：
 
-**Complie options**
+   ```cuda
+   __global__ void kernel() {
+   	...
+   	int j1 = get_block_min(f_val2reduce, f_idx2reduce);
+   	...
+   }
+   ```
 
-icpx 
+   移植后为
 
-***Run***
+   ```c++
+   void kernel() {
+       ...
+       for (int s = lim / 2; s; s >>= 1) {
+           if (tid < s){
+               if(f_val2reduce[f_idx2reduce[tid + s]] < f_val2reduce[f_idx2reduce[tid]])
+                    f_idx2reduce[tid] = f_idx2reduce[tid + s];
+               } 
+       	itm.barrier();
+       }
+       int j1 = f_idx2reduce[0];
+       ...
+   }
+   ```
 
-../build/bin/thundersvm-train -s 0 -t 2 -g 1 -c 10 -o -1 ../data/demo
+2. 数学函数的移植
 
-| main loop |
-| --------- |
-| 40.504s   |
+   oneMKL在大多数数学运算上已支持intel GPU，使用oneMKL在算法的速度与质量上都有保证。本项目中，使用到了oneMKL的稀疏矩阵库用来替代cuSPARSE。注意：cuda代码中矩阵采用的是列优先，dpcpp中矩阵采用的是行优先。
 
-dpcpp需要一些额外的操作才可以
+   cuda代码
 
-这是改过的build_cpu.sh
+   ```cpp
+   void dns_csr_mul(){        
+   	if (!cusparse_init) {
+               cusparseCreate(&handle);
+               cusparseCreateMatDescr(&descr);
+               cusparseSetMatIndexBase(descr, CUSPARSE_INDEX_BASE_ZERO);
+               cusparseSetMatType(descr, CUSPARSE_MATRIX_TYPE_GENERAL);
+               cusparse_init = true;
+           }
+       kernel_type one(1);
+       kernel_type zero(0);
+   	cusparseDcsrmm2(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_TRANSPOSE,
+                           m, n, k, nnz, &one, descr, csr_val.device_data(), csr_row_ptr.device_data(),
+                           csr_col_ind.device_data(),
+                           dense_mat.device_data(), n, &zero, result.device_data(), m);
+       cusparseScsrmm2(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_TRANSPOSE,
+                           m, n, k, nnz, &one, descr, csr_val.device_data(), csr_row_ptr.device_data(),
+                           csr_col_ind.device_data(),
+                           dense_mat.device_data(), n, &zero, result.device_data(), m);
+   }
+   ```
 
-```sh
-rm -rf build
+   dpcpp代码
 
-CC=dpcpp
+   ```cpp
+   void multidevice_dns_csr_mul() {
+   		mkl::sparse::matrix_handle_t handle;
+           mkl::sparse::init_matrix_handle(&handle);    
+           const kernel_type one(1);
+           const kernel_type zero(0);
+           mkl::sparse::set_csr_data(handle, m, k, mkl::index_base::zero,
+                                       csr_row_ptr, csr_col_ind, csr_val);
+           thunder::device_pool[devi].wait();
+           auto e = mkl::sparse::gemm(thunder::device_pool[devi], mkl::layout::col_major, mkl::transpose::nontrans, mkl::transpose::nontrans, one, handle, 
+                                   dense_mat, n, k, 
+                                   zero, result, m);
+           mkl::sparse::release_matrix_handle(&handle, {e});
+   }
+   ```
 
-mkdir build && cd build && cmake -DCMAKE_CXX_COMPILER=$CC -DUSE_GPU=OFF -DUSE_CUDA=OFF -DUSE_PAPI=OFF -DOpenMP_CXX_FLAGS="-qopenmp" -DOpenMP_CXX_LIB_NAMES="libiomp5" -DOpenMP_libiomp5_LIBRARY=/opt/intel/oneapi/compiler/2022.1.0/linux/compiler/lib/intel64_lin/libiomp5.so -DCMAKE_MODULE_PATH=. .. && make -j
+​	3.基本库函数的移植
 
+​		dpcpp library针对STL库进行了优化，同时也支持intel GPU，这里以sort为例进行演示。
 
+​		cuda代码
 
 ```
-
-### GPU
-
-#### Compile options
-
--qopenmp -Ofast -fp-model=precise
-
-#### Run
-
-../build/bin/thundersvm-train -s 0 -t 2 -g 1 -c 10 -o -1 ../data/demo
-
-进度：将代码大部分改成了dpcpp，除了sort的部分。
-
-| main loop |
-| --------- |
-| 26.86s    |
-
-#### 方向
-
-1. 把sort的部分改到GPU上。
-2. 代码细节优化下，把内存优化一下
-3. 考虑多卡的并行。
-
-#### 用计时函数做了一个profile
-
-| function            | data1        | demo       |
-| ------------------- | :----------- | ---------- |
-| sort                | 1118.425ms   | 994.797ms  |
-| c_smo_solve         | 2841.801ms   | 2579.618ms |
-| update_f            | 199.624ms    | 173.002ms  |
-| dns_csr_mul         | 166517.711ms | 4326.598ms |
-| RBF_kernel          | 251.615ms    | 174.855ms  |
-| get_working_set_ins | 1452.001ms   | 323.082ms  |
-
-看起来csmosolve，sort，update_f，优化空间相对较小
-
-但是这个dns_csr_mul又用的mkl，
-
-可以分析一下它的数据流向，然后尝试进行多卡并行。
-
-#### 多卡并行
-
-代码初步完成了，目前的时间是63s，优化了1.5倍（相较于单卡版本）
-
-
-
-#### 目前方向：
-
-1.使用vtune进行测试，目前成功的指令是 vtune -collect=gpu-offload ./run-data1.sh，使用之前可能需要加载一下vtune的环境
-
-```
-source /opt/intel/oneapi/vtune/2022.1.0/env/vars.sh
+ void sort_f(SyncArray<float_type> &f_val2sort, SyncArray<int> &f_idx2sort) {
+     thrust::sort_by_key(thrust::cuda::par, f_val2sort.device_data(), f_val2sort.device_data() + f_val2sort.size(), f_idx2sort.device_data(), thrust::less<float_type>());
+ }
 ```
 
-2.对select_working_set进行微弱的优化，重叠一下（未完成）
+​		dpcpp代码：
 
+   ```cpp
+#include <oneapi/dpl/algorithm>
+#include <oneapi/dpl/execution>
+#include <oneapi/dpl/iterator>
+#include <CL/sycl.hpp>
+//头文件需置于<algorithm>之前
+    void sort_f(SyncArray<float_type> &f_val2sort, SyncArray<int> &f_idx2sort) {
+        //LOG(INFO) << "sort_f";
+     //   sort_t.start();
+        buffer<float_type> vals_buf{f_val2sort.device_data(),range<1>(f_val2sort.size())};
+        buffer<int> idx_buf{f_idx2sort.device_data(), range<1> (f_idx2sort.size())};
+        auto vals_begin = oneapi::dpl::begin(vals_buf);
+        auto idx_begin = oneapi::dpl::begin(idx_buf);
+        
+        oneapi::dpl::execution::__dpl::device_policy<> policy{thunder::device_pool[0]};
+        auto zipped_begin = oneapi::dpl::make_zip_iterator(vals_begin, idx_begin);
+        std::sort(policy, zipped_begin, zipped_begin + f_val2sort.size(),
+                        [](auto lhs, auto rhs) {return get<0>(lhs) < get<0>(rhs); });
+     //   sort_t.end();
+    }
+   ```
 
+​		4.多卡内存管理
 
+​		目前intel GPU并不支持卡间通信，所以必须要通过CPU进行数据的传输。在多卡计算时，最好不要使用shared_ptr，否则会出现错误。
 
+```cpp
+   for (int i = 0; i < poolsize; ++i) {
+      	device_pool[i].memcpy(val_c[i][0], val_.host_data(), val_.mem_size());
+        device_pool[i].memcpy(row_ptr_c[i][0], row_ptr_.host_data(), row_ptr_.mem_size());
+        device_pool[i].memcpy(col_ind_c[i][0], col_ind_.host_data(), col_ind_.mem_size());
+   }
+```
 
-### 11.14
+### 性能分析
 
-经过漫长的调试，多卡目前的时间为59.2s。
+​		优化过程中，我们使用的主要工具是VTune，这里进行简单演示。
 
-主要手段为添加AoT编译，预分配一些内存，减少内存的分配
+```
+vtune -collect gpu-offload -- ./run.sh data
+```
 
-同时，在尝试切分矩阵的时候发现了一些小问题。
+​		之后将分析数据用图形化界面打开便可以进行相关的分析。gpu-offload选项可以分析GPU上的热点，GPU各时段的使用状态，以及GPU上不同层级内存的数据传输量。更多使用细节可以参照intel的[官方教程]([VTune™ Profiler GPU Analysis (intel.com)](https://www.intel.com/content/www/us/en/develop/documentation/oneapi-gpu-optimization-guide/top/tools/vtune.html))，或是使用help命令来进行查找。
 
-​	1.mkl只在一个compute上跑，然而一个tile貌似可以管4个，这导致GPU总体利用率不高。
+### 运行环境：
 
-2. 测试代码里，在加上openmp之后，GPU上的调度似乎还有点问题，没有最大化利用资源。
+*  intel oneapi 2022.1.0
 
-2.切分矩阵目前还没有成功，正在查找bug，感觉应该是内存越界的问题（自己造的孽。。。
+### 编译：
 
-3.尝试使用gdb-oneapi来帮助寻找bug，最后一次跑成功了，但是中间结果错了，（之前将Re_c独立了出来）
+1. 启用oneapi环境
 
-4.考虑下PPT的事情，以及那个自主技术创新申报表的事情。
+   ```shell
+   source /path/to/your/intel/oneapi/setvars.sh
+   ```
+2. 打开build.sh，配置cmake中intel openmp库路径
+   ```shell
+   DOpenMP_libiomp5_LIBRARY=/path/to/your/intel/oneapi/compiler/2022.1.0/linux/compiler/lib/intel64_lin/libiomp5.so
+   ```
 
-### 11.16
+3. 运行build.sh，完成编译。
 
-目前时间52.807s
+### 运行：
 
-直接将set_csr_data进行了一个预处理，减少了反复加载数据。
+将对应格式的数据置于data目录下，然后前往run目录，运行run.sh脚本
 
-通过观察Vtune的结果以及运行过程中GPU的利用率，认为csr_dns的矩阵乘可能对访存依赖较大，多开线程提升可能也不是很显著。
+```shell
+./run.sh ${dataname}
+```
 
-就没有继续考虑openmp了.
+运行结果存放于run目录下的result.txt中。
+
+### 
