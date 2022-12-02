@@ -2,7 +2,7 @@
 
 ### 概览：
 
-本项目将[thundersvm]([Xtra-Computing/thundersvm: ThunderSVM: A Fast SVM Library on GPUs and CPUs (github.com)](https://github.com/Xtra-Computing/thundersvm))进行了移植，使其可以运行在多块intel GPU上。项目重点在于如何使用oneapi套件对cuda代码进行移植优化，以及实现现版本intelGPU的多卡计算。在项目的移植与优化过程中，使用到的开发套件有dpcpp，oneMKL，以及dpcpp library。同时主要使用了intel Vtune进行项目代码的调优。
+本项目将[thundersvm](https://github.com/Xtra-Computing/thundersvm)进行了移植，使其可以运行在多块intel GPU上。项目重点在于如何使用oneapi套件对cuda代码进行移植优化，以及实现现版本intelGPU的多卡计算。在项目的移植与优化过程中，使用到的开发套件有dpcpp，oneMKL，以及dpcpp library。同时主要使用了intel Vtune进行项目代码的调优。
 
 ### 代码移植：
 
@@ -139,7 +139,7 @@
 vtune -collect gpu-offload -- ./run.sh data
 ```
 
-​		之后将分析数据用图形化界面打开便可以进行相关的分析。gpu-offload选项可以分析GPU上的热点，GPU各时段的使用状态，以及GPU上不同层级内存的数据传输量。更多使用细节可以参照intel的[官方教程]([VTune™ Profiler GPU Analysis (intel.com)](https://www.intel.com/content/www/us/en/develop/documentation/oneapi-gpu-optimization-guide/top/tools/vtune.html))，或是使用help命令来进行查找。
+​		之后将分析数据用图形化界面打开便可以进行相关的分析。gpu-offload选项可以分析GPU上的热点，GPU各时段的使用状态，以及GPU上不同层级内存的数据传输量。更多使用细节可以参照intel的[官方教程](https://www.intel.com/content/www/us/en/develop/documentation/oneapi-gpu-optimization-guide/top/tools/vtune.html)，或是使用help命令来进行查找。
 
 ### 运行环境：
 
